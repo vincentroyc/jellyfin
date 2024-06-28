@@ -15,6 +15,7 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
@@ -147,28 +148,26 @@ public class DynamicHlsHelper
 
         builder.AppendLine("#EXTM3U");
 
+        if (state.AudioStream is not null && !state.IsVideoRequest)
+        {
+            var item = _libraryManager.GetItemById<Audio>(streamingRequest.Id);
+            builder.Append("#EXTART:" + item.Name);
+            if (item.Artists.Count > 0 || item.AlbumArtists.Count > 0)
+            {
+                var allArtists = item.Artists.Concat(item.AlbumArtists);
+                builder.AppendLine(" - " + string.Join(", ", allArtists));
+            }
+            else
+            {
+                builder.AppendLine(string.Empty);
+            }
+        }
+
         var isLiveStream = state.IsSegmentedLiveStream;
 
         var queryString = _httpContextAccessor.HttpContext.Request.QueryString.ToString();
 
-        // from universal audio service
-        if (!string.IsNullOrWhiteSpace(state.Request.SegmentContainer)
-            && !queryString.Contains("SegmentContainer", StringComparison.OrdinalIgnoreCase))
-        {
-            queryString += "&SegmentContainer=" + state.Request.SegmentContainer;
-        }
-
-        // from universal audio service
-        if (!string.IsNullOrWhiteSpace(state.Request.TranscodeReasons)
-            && !queryString.Contains("TranscodeReasons=", StringComparison.OrdinalIgnoreCase))
-        {
-            queryString += "&TranscodeReasons=" + state.Request.TranscodeReasons;
-        }
-
-        // Main stream
-        var playlistUrl = isLiveStream ? "live.m3u8" : "main.m3u8";
-
-        playlistUrl += queryString;
+        var playlistUrl = BuildAlternatePlaylistUrl(state, queryString, -1, -1);
 
         var subtitleStreams = state.MediaSource
             .MediaStreams
@@ -244,6 +243,33 @@ public class DynamicHlsHelper
                 var newPlaylist = ReplacePlaylistCodecsField(basicPlaylist, playlistCodecsField, newPlaylistCodecsField);
                 builder.Append(newPlaylist);
             }
+
+            // Provide down to Apple TV 2 (A4 chip) capability for AirPlay
+            // e.g. Apple A4 chips refuse the master playlist containing definition for H264 codec specifying profile 4.1 or more,
+            // but in fact it is capable of playing them
+            _logger.LogInformation("is copy codec {0}", state.ActualOutputVideoCodec);
+            if (string.IsNullOrEmpty(state.GetRequestedLevel(state.ActualOutputVideoCodec))
+                && string.Equals(state.ActualOutputVideoCodec, "h264", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("ADD ALTERNATIVE h264 video level");
+                // Add alternative video level to 4.0.
+                var originalLevel = state.GetRequestedLevel(state.ActualOutputVideoCodec);
+                state.BaseRequest.Level = "40";
+                AppendPlaylist(builder, state, playlistUrl, totalBitrate, subtitleGroup);
+                state.BaseRequest.Level = originalLevel;
+            }
+        }
+        else
+        {
+            _logger.LogInformation("Audio request only");
+            _logger.LogInformation("bitrate {0}", totalBitrate);
+            if (totalBitrate > 32000
+                && string.Equals(state.ActualOutputAudioCodec, "aac", StringComparison.OrdinalIgnoreCase))
+            {
+                playlistUrl = BuildAlternatePlaylistUrl(state, queryString, 32000, -1);
+                _logger.LogInformation("ADD ALTERNATIVE aac audio bitrate");
+                AppendPlaylist(builder, state, playlistUrl, 32000, subtitleGroup);
+            }
         }
 
         if (EnableAdaptiveBitrateStreaming(state, isLiveStream, enableAdaptiveBitrateStreaming, _httpContextAccessor.HttpContext.GetNormalizedRemoteIP()))
@@ -270,7 +296,48 @@ public class DynamicHlsHelper
             AddTrickplay(state, trickplayResolutions, builder, _httpContextAccessor.HttpContext.User);
         }
 
+        string outputString = builder.ToString();
+        _logger.LogInformation("SEGMENT CONTAINER {0}", streamingRequest.SegmentContainer);
+        _logger.LogInformation("{0}", outputString);
         return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
+    }
+
+    private string BuildAlternatePlaylistUrl(StreamState state, string queryString, int audioBitRate, int videoBitRate)
+    {
+        var isLiveStream = state.IsSegmentedLiveStream;
+
+        /*// from universal audio service
+        if (!string.IsNullOrWhiteSpace(state.Request.SegmentContainer)
+            && !queryString.Contains("SegmentContainer", StringComparison.OrdinalIgnoreCase))
+        {
+            queryString += "&SegmentContainer=" + state.Request.SegmentContainer;
+        }
+
+        // from universal audio service
+        if (!string.IsNullOrWhiteSpace(state.Request.TranscodeReasons)
+            && !queryString.Contains("TranscodeReasons=", StringComparison.OrdinalIgnoreCase))
+        {
+            queryString += "&TranscodeReasons=" + state.Request.TranscodeReasons;
+        }
+
+        if (!queryString.Contains("VideoBitRate=", StringComparison.OrdinalIgnoreCase)
+            && videoBitRate > 0)
+        {
+            queryString += "&VideoBitRate=" + videoBitRate;
+        }
+
+        if (!queryString.Contains("AudioBitRate=", StringComparison.OrdinalIgnoreCase)
+            && audioBitRate > 0)
+        {
+            queryString += "&AudioBitRate=" + audioBitRate;
+        }*/
+
+        // Main stream
+        var playlistUrl = isLiveStream ? "live.m3u8" : "main.m3u8";
+
+        playlistUrl += queryString;
+
+        return playlistUrl;
     }
 
     private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup)
@@ -559,6 +626,7 @@ public class DynamicHlsHelper
         {
             if (string.Equals(state.ActualOutputVideoCodec, "h264", StringComparison.OrdinalIgnoreCase))
             {
+                _logger.LogInformation("level requested {0}", state.GetRequestedLevel(state.ActualOutputVideoCodec));
                 levelString = state.GetRequestedLevel(state.ActualOutputVideoCodec) ?? "41";
                 levelString = EncodingHelper.NormalizeTranscodingLevel(state, levelString);
             }
@@ -593,6 +661,7 @@ public class DynamicHlsHelper
     /// <returns>Profile of the output video stream.</returns>
     private string GetOutputVideoCodecProfile(StreamState state, string codec)
     {
+        _logger.LogInformation("{0} {1}", state, codec);
         string profileString = string.Empty;
         if (EncodingHelper.IsCopyCodec(state.OutputVideoCodec)
             && !string.IsNullOrEmpty(state.VideoStream.Profile))
@@ -602,9 +671,9 @@ public class DynamicHlsHelper
         else if (!string.IsNullOrEmpty(codec))
         {
             profileString = state.GetRequestedProfiles(codec).FirstOrDefault() ?? string.Empty;
-            if (string.Equals(state.ActualOutputVideoCodec, "h264", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(state.ActualOutputVideoCodec, "h264", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(profileString))
             {
-                profileString ??= "high";
+                profileString = "high";
             }
 
             if (string.Equals(state.ActualOutputVideoCodec, "h265", StringComparison.OrdinalIgnoreCase)
@@ -613,6 +682,11 @@ public class DynamicHlsHelper
             {
                 profileString ??= "main";
             }
+
+            _logger.LogInformation("{0}", state.SupportedVideoCodecs);
+            _logger.LogInformation("{0}", state.OutputVideoCodec);
+            _logger.LogInformation("{0}", state.ActualOutputVideoCodec);
+            _logger.LogInformation("profile determination {0}", profileString);
         }
 
         return profileString;
@@ -688,6 +762,7 @@ public class DynamicHlsHelper
         if (string.Equals(codec, "h264", StringComparison.OrdinalIgnoreCase))
         {
             string profile = GetOutputVideoCodecProfile(state, "h264");
+            _logger.LogInformation("{0} {1}", profile, level);
             return HlsCodecStringHelpers.GetH264String(profile, level);
         }
 

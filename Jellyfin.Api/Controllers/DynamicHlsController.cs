@@ -16,6 +16,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Extensions;
 using Jellyfin.MediaEncoding.Hls.Playlist;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
@@ -291,6 +292,8 @@ public class DynamicHlsController : BaseJellyfinApiController
 
         TranscodingJob? job = null;
         var playlistPath = Path.ChangeExtension(state.OutputFilePath, ".m3u8");
+
+        _logger.LogInformation("m3u8 : {0}", playlistPath);
 
         if (!System.IO.File.Exists(playlistPath))
         {
@@ -1185,9 +1188,11 @@ public class DynamicHlsController : BaseJellyfinApiController
             Context = context ?? EncodingContext.Streaming,
             StreamOptions = streamOptions
         };
-
+        _logger.LogInformation("{0} {1}", container, segmentId);
+        // this.Response.Redirect(_serverConfigurationManager.GetNetworkConfiguration().BaseUrl + "/Videos/" + itemId + "/live.m3u8");
         return await GetDynamicSegment(streamingRequest, segmentId)
             .ConfigureAwait(false);
+        // return Redirect(_serverConfigurationManager.GetNetworkConfiguration().BaseUrl + "/Videos/" + itemId + "/live.m3u8");
     }
 
     /// <summary>
@@ -1393,6 +1398,10 @@ public class DynamicHlsController : BaseJellyfinApiController
             EncodingHelper.IsCopyCodec(state.OutputVideoCodec));
         var playlist = _dynamicHlsPlaylistGenerator.CreateMainPlaylist(request);
 
+        // _logger.LogInformation("{0}", playlist);
+        // _logger.LogInformation("{0}", state.SupportedVideoCodecs);
+        // _logger.LogInformation("{0}", state.OutputVideoCodec);
+        // _logger.LogInformation("{0}", state.ActualOutputVideoCodec);
         return new FileContentResult(Encoding.UTF8.GetBytes(playlist), MimeTypes.GetMimeType("playlist.m3u8"));
     }
 
@@ -1424,6 +1433,7 @@ public class DynamicHlsController : BaseJellyfinApiController
         var playlistPath = Path.ChangeExtension(state.OutputFilePath, ".m3u8");
 
         var segmentPath = GetSegmentPath(state, playlistPath, segmentId);
+        _logger.LogInformation("segment path {0}", segmentPath);
 
         var segmentExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
 
@@ -1606,6 +1616,11 @@ public class DynamicHlsController : BaseJellyfinApiController
 
         var hlsArguments = $"-hls_playlist_type {(isEventPlaylist ? "event" : "vod")} -hls_list_size 0";
 
+        // return string.Format(
+        //     CultureInfo.InvariantCulture,
+        //     "{0} -vcodec: libx264, -acodec aac -f hls -hls_list_size 0 -hls_segment_time 10 -start_number 0 -y {1}",
+        //     _encodingHelper.GetInputArgument(state, _encodingOptions, segmentContainer),
+        //     EncodingUtils.NormalizePath(outputPath)).Trim();
         return string.Format(
             CultureInfo.InvariantCulture,
             "{0} {1} -map_metadata -1 -map_chapters -1 -threads {2} {3} {4} {5} -copyts -avoid_negative_ts disabled -max_muxing_queue_size {6} -f hls -max_delay 5000000 -hls_time {7} -hls_segment_type {8} -start_number {9}{10} -hls_segment_filename \"{11}\" {12} -y \"{13}\"",
@@ -1837,6 +1852,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             var negativeMapArgs = _encodingHelper.GetNegativeMapArgsByFilters(state, videoProcessParam);
 
             args = negativeMapArgs + args + videoProcessParam;
+            // args += " -vf \"scale=-1:720, fps=30\" -profile:v main -level:v 3.1";
 
             // -start_at_zero is necessary to use with -ss when seeking,
             // otherwise the target position cannot be determined.

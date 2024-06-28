@@ -142,7 +142,7 @@ public static class HlsCodecStringHelpers
         else
         {
             // Default to constrained baseline if profile is invalid
-            result.Append(".4240");
+            result.Append(".4D40");
         }
 
         string levelHex = level.ToString("X2", CultureInfo.InvariantCulture);
